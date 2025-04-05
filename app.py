@@ -126,13 +126,33 @@ def create_market_price_chart():
         brand_data = df[df['Company Name'] == brand]
         prices = brand_data['Launched Price (USA)'].apply(clean_price)
         
-        stats = {
-            'Brand': brand,
-            'Mean': prices.mean() * USD_TO_IDR,
-            'Min': prices.min() * USD_TO_IDR,
-            'Max': prices.max() * USD_TO_IDR,
-            'Count': len(brand_data)
-        }
+        # Menangani outlier dengan metode IQR
+        Q1 = prices.quantile(0.25)
+        Q3 = prices.quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        
+        # Filter harga yang valid (tidak outlier)
+        valid_prices = prices[(prices >= lower_bound) & (prices <= upper_bound)]
+        
+        if len(valid_prices) > 0:
+            stats = {
+                'Brand': brand,
+                'Mean': valid_prices.mean() * USD_TO_IDR,
+                'Min': valid_prices.min() * USD_TO_IDR,
+                'Max': valid_prices.max() * USD_TO_IDR,
+                'Count': len(valid_prices)
+            }
+        else:
+            # Jika semua data adalah outlier, gunakan statistik asli
+            stats = {
+                'Brand': brand,
+                'Mean': prices.mean() * USD_TO_IDR,
+                'Min': prices.min() * USD_TO_IDR,
+                'Max': prices.max() * USD_TO_IDR,
+                'Count': len(prices)
+            }
         brand_stats.append(stats)
     
     # Konversi ke DataFrame
@@ -191,7 +211,9 @@ def create_market_price_chart():
         height=600,
         yaxis=dict(
             tickformat=',',
-            tickprefix='Rp '
+            tickprefix='Rp ',
+            # Batasi range y-axis untuk visualisasi yang lebih baik
+            range=[0, brand_stats_df['Max'].median() * 2]
         ),
         legend=dict(
             orientation="h",
@@ -241,6 +263,19 @@ def predict():
         
         # Prediksi harga dalam USD
         prediksi_harga_usd = model.predict(X_combined)[0]
+        
+        # Normalisasi prediksi jika terlalu tinggi
+        brand_prices = df[df['Company Name'] == brand]['Launched Price (USA)'].apply(clean_price)
+        max_price = brand_prices.max()
+        min_price = brand_prices.min()
+        mean_price = brand_prices.mean()
+        
+        # Jika prediksi di luar range yang masuk akal, sesuaikan
+        if prediksi_harga_usd > max_price * 1.5:
+            prediksi_harga_usd = mean_price * 1.2
+        elif prediksi_harga_usd < min_price * 0.5:
+            prediksi_harga_usd = mean_price * 0.8
+            
         # Konversi ke IDR
         prediksi_harga_idr = prediksi_harga_usd * USD_TO_IDR
         
@@ -249,10 +284,19 @@ def predict():
         brand_prices = []
         for b in brands:
             prices = df[df['Company Name'] == b]['Launched Price (USA)'].apply(clean_price)
-            brand_prices.append(prices.mean() * USD_TO_IDR)
+            # Menggunakan median untuk menghindari outlier
+            brand_prices.append(prices.median() * USD_TO_IDR)
         
         # Membuat grafik interaktif dengan Plotly
         fig = go.Figure()
+        
+        # Menambahkan bar chart dengan warna yang sesuai untuk setiap merek
+        colors = []
+        for b in brands:
+            if b == brand:
+                colors.append('#FF9999')  # Merah muda untuk merek yang dipilih
+            else:
+                colors.append('#66B2FF')  # Biru untuk merek lain
         
         # Menambahkan bar chart
         fig.add_trace(go.Bar(
@@ -261,7 +305,7 @@ def predict():
             name='Rata-rata Harga per Merek',
             text=[f'Rp {price:,.0f}' for price in brand_prices],
             textposition='auto',
-            marker_color=['#FF9999', '#66B2FF', '#99FF99']  # Warna untuk setiap bar
+            marker_color=colors
         ))
         
         # Menambahkan scatter plot untuk prediksi
@@ -297,7 +341,9 @@ def predict():
             height=600,
             yaxis=dict(
                 tickformat=',',
-                tickprefix='Rp '
+                tickprefix='Rp ',
+                # Batasi range y-axis
+                range=[0, max(brand_prices) * 1.2]
             )
         )
         
@@ -319,14 +365,18 @@ def predict():
                 ram_diff = abs(float(row['RAM'].replace('GB', '')) - ram)
                 front_cam_diff = abs(float(row['Front Camera'].split('MP')[0]) - front_camera)
                 back_cam_diff = abs(float(row['Back Camera'].split('MP')[0]) - back_camera)
-                battery_diff = abs(clean_battery(row['Battery Capacity']) - battery)
+                battery_diff = abs(clean_battery(row['Battery Capacity']) - battery) / 1000  # Normalisasi perbedaan baterai
                 screen_diff = abs(float(row['Screen Size'].replace(' inches', '')) - screen)
                 
-                # Hitung total perbedaan
-                total_diff = ram_diff + front_cam_diff + back_cam_diff + (battery_diff/100) + screen_diff
+                # Hitung total perbedaan dengan bobot
+                total_diff = (ram_diff * 0.2 + 
+                            front_cam_diff * 0.15 + 
+                            back_cam_diff * 0.15 + 
+                            battery_diff * 0.25 + 
+                            screen_diff * 0.25)
                 
                 # Jika total perbedaan kurang dari threshold, tambahkan ke daftar
-                if total_diff < 10:  # Sesuaikan threshold sesuai kebutuhan
+                if total_diff < 5:  # Threshold yang lebih ketat
                     similar_phones.append({
                         'model': row['Model Name'],
                         'ram': row['RAM'],
@@ -335,7 +385,7 @@ def predict():
                         'battery': row['Battery Capacity'],
                         'screen': row['Screen Size'],
                         'price': "{:,.0f}".format(clean_price(row['Launched Price (USA)']) * USD_TO_IDR),
-                        'similarity_score': round(100 - (total_diff * 10), 1)  # Skor kemiripan dalam persen
+                        'similarity_score': round(100 - (total_diff * 20), 1)  # Skor kemiripan dalam persen
                     })
         
         # Urutkan ponsel berdasarkan skor kemiripan
